@@ -1,0 +1,77 @@
+@Library(['asgard-qa-jenkins@master-lke', 'asgard-ci-pipeline@corp']) _
+
+
+pipeline {
+    agent {
+        kubernetes {
+            inheritFrom 'jenkins-s-worker'
+            yamlFile 'jnlp-s-worker.yaml'
+            defaultContainer 'jnlp'
+        }
+    }
+
+    triggers {
+        cron('@weekly')
+    }
+
+    environment {
+        PYTHONPATH = "$PYTHONPATH:$WORKSPACE"
+        SECRETS_DIR = "${env.WORKSPACE}/certs"
+        JIRA_CERT_PATH = "${env.WORKSPACE}/certs/zephyr/svcZephyrForAsgard.crt"
+        JIRA_KEY_PATH = "${env.WORKSPACE}/certs/zephyr/svcZephyrForAsgard.key"
+        GIT_SSH_KEY_FILE = fetchGitSshKey()
+    }
+
+    parameters {
+        string(name: 'BRANCH', defaultValue: 'dev-lke', description: 'Branch from the asgard-bifrost-tests repository to checkout.')
+        string(name: 'SCAN_PATH', defaultValue: 'tests', description: 'Path (relative to repo root) to scan for skip/xfail markers.')
+        string(name: 'HTML_REPORT', defaultValue: 'report/skip_report.html', description: 'Path to write the HTML report to.')
+        string(name: 'TIMEOUT', defaultValue: '60', description: 'Time after which the job will be terminated', trim: true)
+        string(name: 'EMAILS', defaultValue: 'yourmail@domain.com', description: 'Email addresses for the job failure email.')
+    }
+
+    options {
+        timeout(time: "${params.TIMEOUT}", unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '14', daysToKeepStr: '14'))
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    shallowCheckout(
+                        branches: params.BRANCH,
+                        keyFile: env.GIT_SSH_KEY_FILE,
+                        repo_url: Constants.ASGARD_QA_TESTS_URL
+                    )
+                }
+            }
+        }
+
+        stage('Retrieve Secrets from Vault') {
+            steps {
+                script {
+                    // svc-zephyr-for-asgard cert/key/ca are static Vault entries, no cluster needed.
+                    fetchVaultSecrets([])
+                }
+            }
+        }
+
+        stage('Check Skip/XFail Ticket Status') {
+            steps {
+                sh "python3 maintenance/fetch_skip_xfail_status/check_skip_xfail_tickets_status_jenkins.py $params.SCAN_PATH --html $params.HTML_REPORT"
+            }
+        }
+    }
+    post {
+        always {
+            archiveArtifacts artifacts: "${params.HTML_REPORT}", allowEmptyArchive: true
+        }
+        failure {
+            sendEmails(
+                emails: params.EMAILS,
+                message: "Skip/XFail ticket status job FAILED. Please check the job console output."
+            )
+        }
+    }
+}
